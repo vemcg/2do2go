@@ -1,0 +1,130 @@
+name: Build & release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Determine timestamped version/tag
+        id: version
+        run: |
+          BUILD_TIMESTAMP=$(date -u +%Y%m%d.%H%M%S)
+          SHORT_SHA=$(git rev-parse --short=7 "$GITHUB_SHA")
+          VERSION_BASE="0.1.0"
+          BUILD_NUMBER="${{ github.run_number }}"
+          VERSION_NAME="${VERSION_BASE}-${BUILD_NUMBER}"
+          VERSION_CODE=$(date -u +%s)
+          BRANCH="${GITHUB_REF_NAME}"
+          # Same scheme as MicroTasking: every build (any branch) gets its own permanent
+          # versioned release/tag/asset, keyed off github.run_number so nothing ever collides.
+          DISPLAY_VERSION="v${VERSION_NAME}"
+          TAG="$DISPLAY_VERSION"
+          ASSET_NAME="2do2go-$TAG.apk"
+          if [ "$BRANCH" = "main" ]; then
+            RELEASE_NAME="2do2go $DISPLAY_VERSION"
+          else
+            SAFE_BRANCH=$(printf '%s' "$BRANCH" | tr -c 'A-Za-z0-9._-' '-')
+            RELEASE_NAME="2do2go $DISPLAY_VERSION ($SAFE_BRANCH)"
+          fi
+          echo "version_base=$VERSION_BASE" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "build_timestamp=$BUILD_TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "git_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "display_version=$DISPLAY_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "git_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Build debug APK
+        run: |
+          ./gradlew assembleDebug \
+            -PbuildVersionBase="${{ steps.version.outputs.version_base }}" \
+            -PbuildNumber="${{ steps.version.outputs.build_number }}" \
+            -PbuildTimestamp="${{ steps.version.outputs.build_timestamp }}" \
+            -PbuildGitSha="${{ steps.version.outputs.git_sha }}" \
+            -PbuildGitBranch="${{ steps.version.outputs.git_branch }}" \
+            -PbuildVersionCode="${{ steps.version.outputs.version_code }}"
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/${{ steps.version.outputs.asset_name }}"
+
+      - name: Remove previous dev releases (only the newest is kept)
+        if: steps.version.outputs.git_branch != 'main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --limit 100 --json tagName,name \
+            | jq -r '.[] | select(.name | test("^2do2go v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+ \\(")) | .tagName' \
+            | while read -r old_tag; do
+                echo "Deleting superseded dev release: $old_tag"
+                gh release delete "$old_tag" --yes --cleanup-tag
+              done
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.release_name }}
+          files: dist/${{ steps.version.outputs.asset_name }}
+
+      - name: Find latest main release
+        id: mainrelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MAIN_TAG=""
+          if [ "${{ steps.version.outputs.git_branch }}" != "main" ]; then
+            MAIN_TAG=$(gh release list --limit 50 --json tagName,name,publishedAt \
+              | jq -r '[.[] | select(.name | test("^2do2go v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+$"))] | sort_by(.publishedAt) | last | .tagName // empty')
+          fi
+          echo "main_tag=$MAIN_TAG" >> "$GITHUB_OUTPUT"
+          if [ -n "$MAIN_TAG" ]; then
+            echo "main_url=https://github.com/${{ github.repository }}/releases/download/$MAIN_TAG/2do2go-$MAIN_TAG.apk" >> "$GITHUB_OUTPUT"
+          else
+            echo "main_url=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install QR code generator
+        run: pip install --quiet "qrcode[pil]"
+
+      - name: Generate install page + QR code
+        run: |
+          python scripts/generate_install_page.py \
+            --url "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/${{ steps.version.outputs.asset_name }}" \
+            --version "${{ steps.version.outputs.display_version }}" \
+            --branch "${{ steps.version.outputs.git_branch }}" \
+            --main-url "${{ steps.mainrelease.outputs.main_url }}" \
+            --main-version "${{ steps.mainrelease.outputs.main_tag }}" \
+            --out docs
+
+      - name: Deploy install page to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs
+          publish_branch: gh-pages

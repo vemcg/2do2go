@@ -1,0 +1,40 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Row 1: checked item -->
+    <path
+        android:fillColor="#43A047"
+        android:pathData="M22,24 L40,24 L40,42 L22,42 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M25,33 L29,37 L37,27 L39,29 L29,41 L23,35 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#2E7D32"
+        android:strokeWidth="3"
+        android:pathData="M48,33 L90,33" />
+    <!-- Row 2: open item -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#81C784"
+        android:strokeWidth="4"
+        android:pathData="M22,49 L40,49 L40,67 L22,67 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#C8E6C9"
+        android:strokeWidth="3"
+        android:pathData="M48,58 L90,58" />
+    <!-- Row 3: open item -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#81C784"
+        android:strokeWidth="4"
+        android:pathData="M22,74 L40,74 L40,92 L22,92 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#C8E6C9"
+        android:strokeWidth="3"
+        android:pathData="M48,83 L90,83" />
+</vector>
