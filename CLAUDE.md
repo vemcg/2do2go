@@ -6,15 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2do2go is an Android app (Kotlin + Jetpack Compose), a companion to
 [MicroTasking](https://github.com/vemcg/MicroTasking) (sibling repo `../MicroTasking`): a
-traditional to-do list that reads the *same* Google Sheet MicroTasking uses (each tab is a list,
-each checked row is an item), with priority set via an Eisenhower matrix (important x urgent)
-instead of a flat scale. Where MicroTasking pushes semi-random prompts, 2do2go is pull —
-no background alarms, no notifications.
+traditional to-do list that reads the *same* Google Sheet MicroTasking uses, with priority set via
+an Eisenhower matrix (importance x urgency, continuous, not four fixed quadrants) instead of a
+flat scale. Where MicroTasking pushes semi-random prompts, 2do2go is pull — no background alarms,
+no notifications.
 
-Planned but not built: a "Move to To-Do" hand-off from MicroTasking that lands a task here with a
-priority quadrant already set. See `PUNCH_LIST.md` item 1 and MicroTasking's `PUNCH_LIST.md`
-item 8 — it needs a cross-app bridge design decision (Sheet write-back vs. on-device IPC) before
-any of it gets built.
+**Gated ingestion, not "every checked row":** unlike MicroTasking's own task pool, an item only
+reaches 2do2go via an explicit "refer to 2do2go" action in MicroTasking's task queue — a row the
+user just checks directly in the Sheet stays purely MicroTasking's task until referred. Referral
+writes importance/urgency to two hidden, protected columns via a shared Apps Script Web App (owned
+by MicroTasking's repo, `scripts/populate_google_sheet.js` there); 2do2go reads those two columns
+the same way (never via the plain CSV/gviz export, which would leak hidden-column data) and only
+imports rows present in that read. See `SPEC.md` "Referral bridge" for the full contract
+(negotiated directly with MicroTasking's session/repo, PUNCH_LIST.md item 1 there is the mirror of
+this repo's item 1).
 
 ## Commands
 
@@ -23,7 +28,7 @@ Requires an Android SDK; `local.properties` (gitignored) must contain `sdk.dir=<
 - Build debug APK: `./gradlew assembleDebug`
 - Run all unit tests: `./gradlew testDebugUnitTest`
 - Run one test class: `./gradlew testDebugUnitTest --tests "com.twodo2go.app.ToDoDataTest"`
-- Run one test method: `./gradlew testDebugUnitTest --tests "com.twodo2go.app.ToDoDataTest.parseToDoCsv_importsOnlyCheckedRows"`
+- Run one test method: `./gradlew testDebugUnitTest --tests "com.twodo2go.app.ToDoDataTest.toDoItemsFromReferredRows_importsOnlyCheckedRowsWithPrioritySet"`
 - Fast compile check without running tests: `./gradlew compileDebugKotlin`
 
 Manually trigger a build for a non-`main` branch (pushes to other branches do **not**
@@ -32,36 +37,52 @@ auto-trigger the release workflow, same convention as MicroTasking):
 
 ## Architecture
 
-Three source files under `app/src/main/java/com/twodo2go/app/`:
+Four source files under `app/src/main/java/com/twodo2go/app/`:
 
 - **`MainActivity.kt`** — the Activity plus every Compose screen: Settings (paste/QR-scan the
-  Sheet URL, Sync Lists), Lists overview, List detail, the Eisenhower-matrix picker dialog
-  (`QuadrantDialog`/`QuadrantRow`/`QuadrantCell`), add-item dialog, QR scanner (ML Kit barcode
-  scanning, copied from MicroTasking's `QrScannerScreen`).
+  Sheet URL, the Apps Script Web App URL, importance-weight and items-per-list settings, Sync
+  Lists), `CarouselScreen` (a `HorizontalPager` of per-list top-N views — this *is* the home
+  screen, there's no separate "see everything" list-detail screen), the continuous Eisenhower
+  matrix widget (`MatrixWidget`, tap/drag position → importance/urgency floats), `ItemDetailDialog`
+  (progress slider + Complete-for-now/Fully-complete for sheet-backed items, Mark-complete/Delete
+  for ad-hoc ones), add-item dialog, QR scanner (ML Kit barcode scanning, copied from
+  MicroTasking's `QrScannerScreen`).
 - **`ToDoData.kt`** — data model (`ToDoItem`, `Quadrant`), JSON read/write helpers
-  (SharedPreferences-backed, no Room/DB — same convention as MicroTasking's `TaskPool.kt`), CSV
-  row → item parsing (`parseToDoCsv`), and the merge-on-resync policy (`mergeImportedToDoItems`).
+  (SharedPreferences-backed, no Room/DB — same convention as MicroTasking's `TaskPool.kt`), plain
+  CSV row parsing (`parseToDoCsvRows`), gated-ingestion item construction
+  (`toDoItemsFromReferredRows`, requires a `SheetPriority` per row from `SheetApiClient.kt`), and
+  the merge-on-resync policy (`mergeImportedToDoItems`).
 - **`SheetImport.kt`** — generic Google Sheet tab discovery + per-tab CSV fetch
-  (`fetchSheetTabs`), adapted from MicroTasking's `MainActivity.kt` Sheet-import functions but
-  kept free of any `ToDoItem`-specific mapping so it's just "give me every tab's raw CSV."
+  (`fetchSheetTabs`, columns A-C only), adapted from MicroTasking's `MainActivity.kt` Sheet-import
+  functions but kept free of any `ToDoItem`-specific mapping so it's just "give me every tab's raw
+  CSV."
+- **`SheetApiClient.kt`** — client for the Apps Script Web App that reads/writes the hidden,
+  protected importance/urgency columns (`fetchTabPriorities`) and clears/deletes a row
+  (`clearSheetPriority`, `deleteSheetRow`). The endpoint is owned and implemented by MicroTasking's
+  repo (`scripts/populate_google_sheet.js` there); this file's request/response shape is
+  provisional until that side's contract is confirmed — see PUNCH_LIST.md.
 
-**Priority model**: not a flat field — `ToDoItem.important`/`urgent` are independent booleans set
-by which quadrant of the matrix widget was tapped. `ToDoItem.priorityScore()`
-(`important*2 + urgent`) is the sort key, computed on read, not stored. See `SPEC.md` for the
-quadrant table and the reasoning behind the 2x importance weighting (a tunable starting point).
+**Priority model**: not a flat field, and not fixed-weight either — `ToDoItem.importance`/`urgency`
+are independent floats (0f..1f), continuous rather than four fixed quadrants, set by the exact
+tap/drag position on `MatrixWidget`. `ToDoItem.priorityScore(importanceWeight)`
+(`importance * importanceWeight + urgency`) is the sort key, computed on read, not stored — the
+weight itself is a user Settings value (`DEFAULT_IMPORTANCE_WEIGHT = 2f`), not a hardcoded
+constant, since MicroTasking always writes raw unweighted values. `Quadrant`/`quadrant()` still
+exist as a coarse 0.5-threshold bucketing for badge display/coloring only.
 
 **Merge-on-resync policy, deliberately asymmetric with MicroTasking's**: `mergeImportedToDoItems`
-only *adds* newly-checked sheet rows not already present by id — it never removes or overwrites an
-existing item just because its sheet row disappeared or got unchecked, since an item already
-being triaged/worked here shouldn't vanish because of an edit made elsewhere. (MicroTasking's
-`mergeImportedManagedTasks` is stricter because its sheet is the authoritative *category* list;
-2do2go's sheet is only ever a source of new items, never a mirror to sync down to.)
+only *adds* newly-imported sheet rows not already present by id — it never removes or overwrites an
+existing item just because its sheet row disappeared, got its priority cleared, or the re-import
+ran again. An item you're already treating as a live to-do here (progress, priority re-triage)
+stays yours until you deal with it in the app; the sheet is a source of new items, not a mirror to
+sync down to. (MicroTasking's `mergeImportedManagedTasks` is stricter because its sheet is the
+authoritative *category* list; 2do2go's sheet is only ever a source of new items.)
 
-**Google Sheet import**: same mechanics as MicroTasking (tab names via the `.xlsx` export's
-zipped `workbook.xml`, each tab's rows via the `gviz` CSV export, column A as the enabled
-checkbox, `description`/`link` matched by header text) — but no Apps Script provisioning tooling
-here, since 2do2go always points at a spreadsheet MicroTasking's own template/onboarding already
-set up. Don't add sheet-provisioning scripts here; that tooling lives in MicroTasking's repo.
+**Google Sheet import**: same mechanics as MicroTasking for columns A-C (tab names via the `.xlsx`
+export's zipped `workbook.xml`, each tab's rows via the `gviz` CSV export, column A as the enabled
+checkbox, `description`/`link` matched by header text) — but no Apps Script *provisioning* tooling
+here (creating/deploying the script), since that script is owned and deployed from MicroTasking's
+repo; this repo only calls it (`SheetApiClient.kt`). Don't add sheet-provisioning scripts here.
 
 **Testing**: plain JUnit, no Robolectric — everything in `ToDoData.kt`/`SheetImport.kt` operates
 on strings/plain objects rather than a real `Context`, so there's nothing that needs a simulated
