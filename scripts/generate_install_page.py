@@ -313,9 +313,9 @@ def main() -> None:
     <div class="tagline">A to-do list, prioritized the Eisenhower way.</div>
     <div class="intro">
       <strong>2do2go</strong> is a companion to MicroTasking: a traditional to-do list that reads
-      the same Google Sheet as MicroTasking (each tab is a list, each checked row is an item), and
-      lets you triage priority by tapping a quadrant on an important/urgent matrix instead of
-      picking a number.
+      the same Google Sheet as MicroTasking. Items don't just appear here from every checked row -
+      you <strong>refer</strong> a task to 2do2go from MicroTasking's own task queue, dragging a
+      finger across an importance/urgency matrix to set its priority as you send it over.
     </div>
   </header>
 
@@ -356,9 +356,35 @@ def main() -> None:
       <ol>
         <li>Open <strong>2do2go</strong> on your Android phone.</li>
         <li>Paste the same Google Sheet URL you used for MicroTasking, or tap <strong>Scan QR</strong> and scan the same Sheet QR code you generated for MicroTasking (from its onboarding page).</li>
+        <li>
+          Paste the <strong>Apps Script Web App URL</strong> too &mdash; this is what lets 2do2go
+          and MicroTasking hand tasks back and forth. It's a one-time setup step done from the
+          Sheet's <strong>Extensions &rarr; Apps Script</strong> editor: <strong>Deploy &rarr; New
+          deployment &rarr; Web app</strong>, Execute as <strong>Me</strong>, Who has access
+          <strong>Anyone with the link</strong>, then Deploy. Paste the URL it gives you into both
+          apps' Settings. (Only needed once per Sheet copy &mdash; if someone already did this for
+          your Sheet, just paste the URL they give you.)
+        </li>
         <li>Tap <strong>Sync Lists</strong>.</li>
       </ol>
-      <p style="color: var(--accent); font-weight: 600; margin-top: 0.5rem;">Each tab in the sheet becomes a list here; each checked row becomes an item, ready to triage.</p>
+    </section>
+
+    <!-- STEP 3 -->
+    <section class="step">
+      <div class="step-header">
+        <div class="step-num">3</div>
+        <div class="step-title">Refer a Task from MicroTasking</div>
+      </div>
+      <p>
+        2do2go starts empty on purpose &mdash; a task only shows up here once you send it over
+        from MicroTasking:
+      </p>
+      <ol>
+        <li>In <strong>MicroTasking</strong>, open the task queue.</li>
+        <li>Tap <strong>Refer to 2do2go</strong> on any task, any time &mdash; it doesn't matter whether you've started it yet.</li>
+        <li>Drag/tap the importance &times; urgency matrix that pops up to set its priority. That task leaves MicroTasking's queue and lands in 2do2go.</li>
+        <li>Back in <strong>2do2go</strong>, swipe between your lists (one per Sheet tab) to find it, set a progress %, and mark it <strong>Complete (for now)</strong> to hand it back to MicroTasking, or <strong>Fully complete</strong> to remove it for good.</li>
+      </ol>
     </section>
   </main>
 </body>
