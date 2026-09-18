@@ -15,28 +15,35 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -46,6 +53,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -61,9 +69,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -83,9 +92,15 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     TwoDo2GoApp(
                         initialSheetUrl = preferences.getString("sheet_url", "") ?: "",
+                        initialAppsScriptUrl = preferences.getString("apps_script_url", "") ?: "",
+                        initialImportanceWeight = preferences.getFloat("importance_weight", DEFAULT_IMPORTANCE_WEIGHT),
+                        initialTopN = preferences.getInt("top_n", 5),
                         initialItems = readToDoItems(preferences.getString("todo_items", "[]") ?: "[]"),
                         initialLists = readStringList(preferences.getString("known_lists", "[]") ?: "[]"),
                         onSheetUrlSaved = { url -> preferences.edit().putString("sheet_url", url).apply() },
+                        onAppsScriptUrlSaved = { url -> preferences.edit().putString("apps_script_url", url).apply() },
+                        onImportanceWeightSaved = { weight -> preferences.edit().putFloat("importance_weight", weight).apply() },
+                        onTopNSaved = { count -> preferences.edit().putInt("top_n", count).apply() },
                         onItemsSaved = { items -> preferences.edit().putString("todo_items", writeToDoItems(items)).apply() },
                         onListsSaved = { lists -> preferences.edit().putString("known_lists", writeStringList(lists)).apply() }
                     )
@@ -99,26 +114,35 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { OVERVIEW, SETTINGS, LIST_DETAIL, QR_SCANNER }
+private enum class Screen { CAROUSEL, SETTINGS, QR_SCANNER }
 
 @Composable
 fun TwoDo2GoApp(
     initialSheetUrl: String,
+    initialAppsScriptUrl: String,
+    initialImportanceWeight: Float,
+    initialTopN: Int,
     initialItems: List<ToDoItem>,
     initialLists: List<String>,
     onSheetUrlSaved: (String) -> Unit,
+    onAppsScriptUrlSaved: (String) -> Unit,
+    onImportanceWeightSaved: (Float) -> Unit,
+    onTopNSaved: (Int) -> Unit,
     onItemsSaved: (List<ToDoItem>) -> Unit,
     onListsSaved: (List<String>) -> Unit
 ) {
-    var screen by remember { mutableStateOf(if (initialSheetUrl.isBlank()) Screen.SETTINGS else Screen.OVERVIEW) }
+    var screen by remember { mutableStateOf(if (initialSheetUrl.isBlank()) Screen.SETTINGS else Screen.CAROUSEL) }
     var sheetUrl by remember { mutableStateOf(initialSheetUrl) }
+    var appsScriptUrl by remember { mutableStateOf(initialAppsScriptUrl) }
+    var importanceWeight by remember { mutableStateOf(initialImportanceWeight) }
+    var topN by remember { mutableStateOf(initialTopN) }
     var items by remember { mutableStateOf(initialItems) }
     var lists by remember { mutableStateOf(initialLists) }
-    var currentList by remember { mutableStateOf<String?>(null) }
     var editingItemId by remember { mutableStateOf<String?>(null) }
-    var showingAddItem by remember { mutableStateOf(false) }
+    var addItemList by remember { mutableStateOf<String?>(null) }
     var syncMessage by remember { mutableStateOf("") }
     var syncing by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     fun persistItems(newItems: List<ToDoItem>) {
@@ -133,19 +157,59 @@ fun TwoDo2GoApp(
 
     fun runSync() {
         if (sheetUrl.isBlank()) return
+        if (appsScriptUrl.isBlank()) {
+            syncMessage = "Set the Apps Script Web App URL below to sync referred items."
+            return
+        }
         syncing = true
         coroutineScope.launch {
             val tabs = withContext(Dispatchers.IO) { fetchSheetTabs(sheetUrl) }
-            syncing = false
             if (tabs.isEmpty()) {
+                syncing = false
                 syncMessage = "Couldn't read any tabs from this Sheet. Check the URL and that " +
                     "sharing is \"Anyone with the link can view\"."
                 return@launch
             }
-            val imported = tabs.flatMap { tab -> parseToDoCsv(tab.csv, tab.tabName) }
+            val imported = withContext(Dispatchers.IO) {
+                val prioritiesByTab = fetchAllPriorities(appsScriptUrl)
+                    .groupBy { it.category }
+                    .mapValues { (_, rows) -> rows.associate { it.description to it.priority } }
+                tabs.flatMap { tab ->
+                    toDoItemsFromReferredRows(tab.csv, tab.tabName, prioritiesByTab[tab.tabName].orEmpty())
+                }
+            }
+            syncing = false
             persistItems(mergeImportedToDoItems(imported, items))
             persistLists(tabs.map { it.tabName })
             syncMessage = "Synced ${tabs.size} list(s)."
+        }
+    }
+
+    fun completeForNow(item: ToDoItem) {
+        busy = true
+        coroutineScope.launch {
+            val ok = withContext(Dispatchers.IO) { clearSheetPriority(appsScriptUrl, item.list, item.description) }
+            busy = false
+            if (ok) {
+                persistItems(items.filterNot { it.id == item.id })
+                editingItemId = null
+            } else {
+                syncMessage = "Couldn't reach the Sheet to clear this item's priority - check your connection and try again."
+            }
+        }
+    }
+
+    fun fullyComplete(item: ToDoItem) {
+        busy = true
+        coroutineScope.launch {
+            val ok = withContext(Dispatchers.IO) { deleteSheetRow(appsScriptUrl, item.list, item.description) }
+            busy = false
+            if (ok) {
+                persistItems(items.filterNot { it.id == item.id })
+                editingItemId = null
+            } else {
+                syncMessage = "Couldn't reach the Sheet to remove this row - check your connection and try again."
+            }
         }
     }
 
@@ -165,75 +229,80 @@ fun TwoDo2GoApp(
                 sheetUrl = it
                 onSheetUrlSaved(it)
             },
+            appsScriptUrl = appsScriptUrl,
+            onAppsScriptUrlChange = {
+                appsScriptUrl = it
+                onAppsScriptUrlSaved(it)
+            },
+            importanceWeight = importanceWeight,
+            onImportanceWeightChange = {
+                importanceWeight = it
+                onImportanceWeightSaved(it)
+            },
+            topN = topN,
+            onTopNChange = {
+                topN = it
+                onTopNSaved(it)
+            },
             onScanQr = { screen = Screen.QR_SCANNER },
             onSync = ::runSync,
             syncing = syncing,
             syncMessage = syncMessage,
             canGoBack = lists.isNotEmpty(),
-            onBack = { screen = Screen.OVERVIEW }
+            onBack = { screen = Screen.CAROUSEL }
         )
-        Screen.LIST_DETAIL -> {
-            val listName = currentList
-            if (listName == null) {
-                screen = Screen.OVERVIEW
-            } else {
-                ListDetailScreen(
-                    listName = listName,
-                    items = items.filter { it.list == listName },
-                    onBack = { screen = Screen.OVERVIEW },
-                    onToggleDone = { id ->
-                        persistItems(items.map {
-                            if (it.id == id) {
-                                it.copy(done = !it.done, doneAtEpochMs = if (!it.done) System.currentTimeMillis() else null)
-                            } else it
-                        })
-                    },
-                    onEditQuadrant = { id -> editingItemId = id },
-                    onDeleteItem = { id -> persistItems(items.filterNot { it.id == id }) },
-                    onAddItem = { showingAddItem = true }
-                )
-            }
-        }
-        Screen.OVERVIEW -> ListsOverviewScreen(
+        Screen.CAROUSEL -> CarouselScreen(
             lists = lists,
             items = items,
-            onOpenList = {
-                currentList = it
-                screen = Screen.LIST_DETAIL
-            },
-            onOpenSettings = { screen = Screen.SETTINGS }
+            importanceWeight = importanceWeight,
+            topN = topN,
+            onOpenSettings = { screen = Screen.SETTINGS },
+            onOpenItem = { editingItemId = it },
+            onAddItem = { listName -> addItemList = listName }
         )
     }
 
     val editingItem = items.find { it.id == editingItemId }
     if (editingItem != null) {
-        QuadrantDialog(
-            title = "Set priority",
-            initialImportant = editingItem.important,
-            initialUrgent = editingItem.urgent,
+        ItemDetailDialog(
+            item = editingItem,
+            busy = busy,
             onDismiss = { editingItemId = null },
-            onSelect = { important, urgent ->
+            onPriorityChange = { importance, urgency ->
+                persistItems(items.map { if (it.id == editingItem.id) it.copy(importance = importance, urgency = urgency) else it })
+            },
+            onProgressChange = { progress ->
+                persistItems(items.map { if (it.id == editingItem.id) it.copy(progress = progress) else it })
+            },
+            onCompleteForNow = { completeForNow(editingItem) },
+            onFullyComplete = { fullyComplete(editingItem) },
+            onMarkLocalComplete = {
                 persistItems(items.map {
-                    if (it.id == editingItem.id) it.copy(important = important, urgent = urgent) else it
+                    if (it.id == editingItem.id) it.copy(done = true, doneAtEpochMs = System.currentTimeMillis()) else it
                 })
+                editingItemId = null
+            },
+            onDeleteLocal = {
+                persistItems(items.filterNot { it.id == editingItem.id })
                 editingItemId = null
             }
         )
     }
 
-    if (showingAddItem && currentList != null) {
+    val addingToList = addItemList
+    if (addingToList != null) {
         AddItemDialog(
-            onDismiss = { showingAddItem = false },
-            onConfirm = { description, important, urgent ->
+            onDismiss = { addItemList = null },
+            onConfirm = { description, importance, urgency ->
                 val newItem = ToDoItem(
                     id = "local-${System.currentTimeMillis()}-${items.size}",
                     description = description,
-                    list = currentList!!,
-                    important = important,
-                    urgent = urgent
+                    list = addingToList,
+                    importance = importance,
+                    urgency = urgency
                 )
                 persistItems(items + newItem)
-                showingAddItem = false
+                addItemList = null
             }
         )
     }
@@ -244,6 +313,12 @@ fun TwoDo2GoApp(
 fun SettingsScreen(
     sheetUrl: String,
     onSheetUrlChange: (String) -> Unit,
+    appsScriptUrl: String,
+    onAppsScriptUrlChange: (String) -> Unit,
+    importanceWeight: Float,
+    onImportanceWeightChange: (Float) -> Unit,
+    topN: Int,
+    onTopNChange: (Int) -> Unit,
     onScanQr: () -> Unit,
     onSync: () -> Unit,
     syncing: Boolean,
@@ -264,8 +339,8 @@ fun SettingsScreen(
         )
         Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
             Text(
-                "Point 2do2go at the same Google Sheet you already use for MicroTasking. Each " +
-                    "tab becomes a to-do list here; each checked row becomes an item.",
+                "Point 2do2go at the same Google Sheet you already use for MicroTasking. Items " +
+                    "only show up here once you've referred them from MicroTasking's task queue.",
                 style = MaterialTheme.typography.bodyMedium
             )
             OutlinedTextField(
@@ -273,6 +348,12 @@ fun SettingsScreen(
                 onValueChange = onSheetUrlChange,
                 modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
                 label = { Text("Google Sheet URL") }
+            )
+            OutlinedTextField(
+                value = appsScriptUrl,
+                onValueChange = onAppsScriptUrlChange,
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                label = { Text("Apps Script Web App URL") }
             )
             Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(onClick = onScanQr, modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -291,28 +372,65 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            Text(
+                "Importance weight: ${"%.1f".format(importanceWeight)}x",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(top = 24.dp)
+            )
+            Text(
+                "How much more an item's importance counts than its urgency when ranking your " +
+                    "lists (score = importance × weight + urgency).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Slider(
+                value = importanceWeight,
+                onValueChange = onImportanceWeightChange,
+                valueRange = 0.5f..4f,
+                steps = 6
+            )
+
+            Text("Items per list: $topN", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { if (topN > 1) onTopNChange(topN - 1) }) { Text("−") }
+                Text("$topN", modifier = Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
+                OutlinedButton(onClick = { if (topN < 10) onTopNChange(topN + 1) }) { Text("+") }
+            }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ListsOverviewScreen(
+fun CarouselScreen(
     lists: List<String>,
     items: List<ToDoItem>,
-    onOpenList: (String) -> Unit,
-    onOpenSettings: () -> Unit
+    importanceWeight: Float,
+    topN: Int,
+    onOpenSettings: () -> Unit,
+    onOpenItem: (String) -> Unit,
+    onAddItem: (list: String) -> Unit
 ) {
+    val pagerState = rememberPagerState(pageCount = { lists.size })
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("2do2go") },
+                title = { Text(lists.getOrNull(pagerState.currentPage) ?: "2do2go") },
                 actions = {
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
                 }
             )
+        },
+        floatingActionButton = {
+            val currentList = lists.getOrNull(pagerState.currentPage)
+            if (currentList != null) {
+                FloatingActionButton(onClick = { onAddItem(currentList) }) {
+                    Icon(Icons.Filled.Add, contentDescription = "Add item")
+                }
+            }
         }
     ) { padding ->
         if (lists.isEmpty()) {
@@ -326,110 +444,48 @@ fun ListsOverviewScreen(
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(lists) { listName ->
-                    val openCount = items.count { it.list == listName && !it.done }
-                    OutlinedCard(
-                        modifier = Modifier.fillMaxWidth().clickable { onOpenList(listName) }
+            return@Scaffold
+        }
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (lists.size > 1) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    lists.forEachIndexed { index, _ ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(4.dp)
+                                .background(
+                                    if (index == pagerState.currentPage) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outlineVariant,
+                                    RoundedCornerShape(2.dp)
+                                )
+                        )
+                    }
+                }
+            }
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                val listName = lists[page]
+                val topItems = sortedForDisplay(items.filter { it.list == listName && !it.done }, importanceWeight).take(topN)
+                if (topItems.isEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(listName, style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "$openCount open",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        Text("Nothing referred to \"$listName\" yet.", style = MaterialTheme.typography.bodyMedium)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(topItems) { toDoItem ->
+                            ToDoItemRow(item = toDoItem, onOpen = { onOpenItem(toDoItem.id) })
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ListDetailScreen(
-    listName: String,
-    items: List<ToDoItem>,
-    onBack: () -> Unit,
-    onToggleDone: (String) -> Unit,
-    onEditQuadrant: (String) -> Unit,
-    onDeleteItem: (String) -> Unit,
-    onAddItem: () -> Unit
-) {
-    val open = sortedForDisplay(items.filter { !it.done })
-    val done = items.filter { it.done }.sortedByDescending { it.doneAtEpochMs ?: it.addedAtEpochMs }
-    val context = LocalContext.current
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(listName) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back to lists")
-                    }
-                }
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = onAddItem) {
-                Icon(Icons.Filled.Add, contentDescription = "Add item")
-            }
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (open.isEmpty() && done.isEmpty()) {
-                item {
-                    Text(
-                        "Nothing here yet. Tap + to add an item.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 16.dp)
-                    )
-                }
-            }
-            items(open) { toDoItem ->
-                ToDoItemRow(
-                    item = toDoItem,
-                    onToggleDone = { onToggleDone(toDoItem.id) },
-                    onEditQuadrant = { onEditQuadrant(toDoItem.id) },
-                    onDelete = { onDeleteItem(toDoItem.id) },
-                    onOpenLink = {
-                        runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(toDoItem.link)))
-                        }
-                    }
-                )
-            }
-            if (done.isNotEmpty()) {
-                item {
-                    Text(
-                        "Done",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 16.dp)
-                    )
-                }
-                items(done) { toDoItem ->
-                    ToDoItemRow(
-                        item = toDoItem,
-                        onToggleDone = { onToggleDone(toDoItem.id) },
-                        onEditQuadrant = { onEditQuadrant(toDoItem.id) },
-                        onDelete = { onDeleteItem(toDoItem.id) },
-                        onOpenLink = {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(toDoItem.link)))
-                            }
-                        }
-                    )
                 }
             }
         }
@@ -444,154 +500,190 @@ private fun quadrantColor(quadrant: Quadrant, colorScheme: androidx.compose.mate
 }
 
 @Composable
-fun ToDoItemRow(
-    item: ToDoItem,
-    onToggleDone: () -> Unit,
-    onEditQuadrant: () -> Unit,
-    onDelete: () -> Unit,
-    onOpenLink: () -> Unit
-) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = item.done, onCheckedChange = { onToggleDone() })
-            Column(modifier = Modifier.weight(1f)) {
+fun ToDoItemRow(item: ToDoItem, onOpen: () -> Unit) {
+    OutlinedCard(modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(item.description, style = MaterialTheme.typography.bodyLarge)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                val quadrant = item.quadrant()
                 Text(
-                    item.description,
-                    style = MaterialTheme.typography.bodyLarge,
-                    textDecoration = if (item.done) TextDecoration.LineThrough else null
+                    quadrant.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = quadrantColor(quadrant, MaterialTheme.colorScheme),
+                    modifier = Modifier.padding(end = 12.dp)
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val quadrant = item.quadrant()
-                    Text(
-                        quadrant.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = quadrantColor(quadrant, MaterialTheme.colorScheme),
-                        modifier = Modifier.clickable(onClick = onEditQuadrant).padding(end = 12.dp)
-                    )
-                    if (item.link.isNotBlank()) {
-                        Text(
-                            "Open link",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable(onClick = onOpenLink)
-                        )
-                    }
-                }
-            }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete ${item.description}")
+                Text(
+                    "${item.progress}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
 }
 
 /**
- * The Eisenhower-matrix priority picker: a big 2x2 grid of tappable quadrants (important x
- * urgent), laid out important-on-top / urgent-on-left. Realized as four clickable cells rather
- * than raw tap-coordinate detection on one surface - same visual result, more robust.
+ * The Eisenhower-matrix priority picker: a single square surface where the exact tap/drag
+ * position becomes continuous importance/urgency values (top-left = most important+urgent = "Do
+ * First", matching the visual layout of the old quadrant grid, just continuous now instead of
+ * four fixed cells). Background tinting shows the four reference quadrants; the dot marks the
+ * current value.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun QuadrantDialog(
-    title: String,
-    initialImportant: Boolean,
-    initialUrgent: Boolean,
-    onDismiss: () -> Unit,
-    onSelect: (important: Boolean, urgent: Boolean) -> Unit
+fun MatrixWidget(
+    importance: Float,
+    urgency: Float,
+    onChange: (importance: Float, urgency: Float) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column {
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("", style = MaterialTheme.typography.labelSmall)
-                    }
-                    Text(
-                        "Urgent", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium
+    val density = LocalDensity.current
+    Column(modifier = modifier) {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text("Urgent", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
+            Text("Not urgent", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
+        }
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+            val widthPx = with(density) { maxWidth.toPx() }
+            val heightPx = with(density) { maxWidth.toPx() } // square widget
+
+            fun applyOffset(x: Float, y: Float) {
+                val newUrgency = (1f - (x / widthPx)).coerceIn(0f, 1f)
+                val newImportance = (1f - (y / heightPx)).coerceIn(0f, 1f)
+                onChange(newImportance, newUrgency)
+            }
+
+            Column(modifier = Modifier.fillMaxWidth().height(maxWidth)) {
+                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxHeight()
+                            .background(quadrantColor(Quadrant.DO_FIRST, MaterialTheme.colorScheme).copy(alpha = 0.16f))
                     )
-                    Text(
-                        "Not urgent", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxHeight()
+                            .background(quadrantColor(Quadrant.SCHEDULE, MaterialTheme.colorScheme).copy(alpha = 0.16f))
                     )
                 }
-                QuadrantRow(
-                    rowLabel = "Important",
-                    leftQuadrant = Quadrant.DO_FIRST,
-                    rightQuadrant = Quadrant.SCHEDULE,
-                    selected = (initialImportant && initialUrgent) to (initialImportant && !initialUrgent),
-                    onLeftClick = { onSelect(true, true) },
-                    onRightClick = { onSelect(true, false) }
+                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxHeight()
+                            .background(quadrantColor(Quadrant.DELEGATE, MaterialTheme.colorScheme).copy(alpha = 0.16f))
+                    )
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxHeight()
+                            .background(quadrantColor(Quadrant.ELIMINATE, MaterialTheme.colorScheme).copy(alpha = 0.16f))
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(maxWidth)
+                    .pointerInputMatrix { x, y -> applyOffset(x, y) }
+            )
+            val markerX = maxWidth * (1f - urgency)
+            val markerY = maxWidth * (1f - importance)
+            Box(
+                modifier = Modifier
+                    .padding(start = markerX - 8.dp, top = markerY - 8.dp)
+                    .size(16.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape)
+            )
+        }
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text("Important", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private fun Modifier.pointerInputMatrix(onOffset: (x: Float, y: Float) -> Unit): Modifier = this
+    .pointerInput(Unit) {
+        detectTapGestures { offset -> onOffset(offset.x, offset.y) }
+    }
+    .pointerInput(Unit) {
+        detectDragGestures { change, _ ->
+            change.consume()
+            onOffset(change.position.x, change.position.y)
+        }
+    }
+
+@Composable
+fun ItemDetailDialog(
+    item: ToDoItem,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onPriorityChange: (importance: Float, urgency: Float) -> Unit,
+    onProgressChange: (Int) -> Unit,
+    onCompleteForNow: () -> Unit,
+    onFullyComplete: () -> Unit,
+    onMarkLocalComplete: () -> Unit,
+    onDeleteLocal: () -> Unit
+) {
+    val isSheetBacked = item.id.startsWith("sheet-")
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(item.description) },
+        text = {
+            Column {
+                if (item.link.isNotBlank()) {
+                    Text(
+                        "Open link",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier
+                            .clickable {
+                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link))) }
+                            }
+                            .padding(bottom = 8.dp)
+                    )
+                }
+                MatrixWidget(
+                    importance = item.importance,
+                    urgency = item.urgency,
+                    onChange = onPriorityChange,
+                    modifier = Modifier.fillMaxWidth()
                 )
-                QuadrantRow(
-                    rowLabel = "Not important",
-                    leftQuadrant = Quadrant.DELEGATE,
-                    rightQuadrant = Quadrant.ELIMINATE,
-                    selected = (!initialImportant && initialUrgent) to (!initialImportant && !initialUrgent),
-                    onLeftClick = { onSelect(false, true) },
-                    onRightClick = { onSelect(false, false) }
+                Text(
+                    "Progress: ${item.progress}%",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(top = 12.dp)
+                )
+                Slider(
+                    value = item.progress.toFloat(),
+                    onValueChange = { onProgressChange(it.toInt()) },
+                    valueRange = 0f..100f
                 )
             }
         },
         confirmButton = {
-            OutlinedButton(onClick = onDismiss) { Text("Close") }
+            if (isSheetBacked) {
+                Column(horizontalAlignment = Alignment.End) {
+                    Button(onClick = onFullyComplete, enabled = !busy) { Text("Fully complete") }
+                    OutlinedButton(onClick = onCompleteForNow, enabled = !busy, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Complete (for now)")
+                    }
+                }
+            } else {
+                Column(horizontalAlignment = Alignment.End) {
+                    Button(onClick = onMarkLocalComplete, enabled = !busy) { Text("Mark complete") }
+                    OutlinedButton(onClick = onDeleteLocal, enabled = !busy, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Delete")
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
         }
     )
 }
 
 @Composable
-private fun QuadrantRow(
-    rowLabel: String,
-    leftQuadrant: Quadrant,
-    rightQuadrant: Quadrant,
-    selected: Pair<Boolean, Boolean>,
-    onLeftClick: () -> Unit,
-    onRightClick: () -> Unit
-) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(rowLabel, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-        QuadrantCell(
-            label = leftQuadrant.label,
-            selected = selected.first,
-            color = quadrantColor(leftQuadrant, MaterialTheme.colorScheme),
-            onClick = onLeftClick,
-            modifier = Modifier.weight(1f)
-        )
-        QuadrantCell(
-            label = rightQuadrant.label,
-            selected = selected.second,
-            color = quadrantColor(rightQuadrant, MaterialTheme.colorScheme),
-            onClick = onRightClick,
-            modifier = Modifier.weight(1f)
-        )
-    }
-}
-
-@Composable
-private fun QuadrantCell(label: String, selected: Boolean, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .padding(4.dp)
-            .aspectRatio(1.4f)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        OutlinedCard(modifier = Modifier.fillMaxSize()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (selected) color else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun AddItemDialog(onDismiss: () -> Unit, onConfirm: (description: String, important: Boolean, urgent: Boolean) -> Unit) {
+fun AddItemDialog(onDismiss: () -> Unit, onConfirm: (description: String, importance: Float, urgency: Float) -> Unit) {
     var description by remember { mutableStateOf("") }
-    var important by remember { mutableStateOf(false) }
-    var urgent by remember { mutableStateOf(false) }
+    var importance by remember { mutableStateOf(0f) }
+    var urgency by remember { mutableStateOf(0f) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -604,31 +696,16 @@ fun AddItemDialog(onDismiss: () -> Unit, onConfirm: (description: String, import
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Description") }
                 )
-                Text(
-                    "Priority: ${ToDoItem(id = "", description = "", list = "", important = important, urgent = urgent).quadrant().label}",
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(top = 12.dp)
-                )
-                QuadrantRow(
-                    rowLabel = "",
-                    leftQuadrant = Quadrant.DO_FIRST,
-                    rightQuadrant = Quadrant.SCHEDULE,
-                    selected = (important && urgent) to (important && !urgent),
-                    onLeftClick = { important = true; urgent = true },
-                    onRightClick = { important = true; urgent = false }
-                )
-                QuadrantRow(
-                    rowLabel = "",
-                    leftQuadrant = Quadrant.DELEGATE,
-                    rightQuadrant = Quadrant.ELIMINATE,
-                    selected = (!important && urgent) to (!important && !urgent),
-                    onLeftClick = { important = false; urgent = true },
-                    onRightClick = { important = false; urgent = false }
+                MatrixWidget(
+                    importance = importance,
+                    urgency = urgency,
+                    onChange = { i, u -> importance = i; urgency = u },
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
                 )
             }
         },
         confirmButton = {
-            Button(onClick = { if (description.isNotBlank()) onConfirm(description.trim(), important, urgent) }) {
+            Button(onClick = { if (description.isNotBlank()) onConfirm(description.trim(), importance, urgency) }) {
                 Text("Add")
             }
         },

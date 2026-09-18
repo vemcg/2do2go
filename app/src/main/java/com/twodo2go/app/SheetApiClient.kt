@@ -1,0 +1,95 @@
+// Copyright (c) 2026 Vern McGeorge. All rights reserved.
+package com.twodo2go.app
+
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * Client for the Apps Script Web App that both 2do2go and MicroTasking use to read/write the
+ * hidden, protected Importance/Urgency columns (and to delete a fully-completed row). Those two
+ * columns are never read via the plain CSV/gviz export used elsewhere in this file/SheetImport.kt
+ * - CSV export includes hidden columns' raw data regardless of Sheets-UI hidden state, which
+ * would defeat the "invisible to the user" requirement. See SPEC.md "Referral bridge".
+ *
+ * Contract as deployed by MicroTasking's repo (scripts/populate_google_sheet.js there), confirmed
+ * 2026-09-18:
+ *   GET  {webAppUrl}?action=getPriorities
+ *        -> {"ok":true,"rows":[{"category","description","importance","urgency"}, ...]} - every
+ *           referred row across every tab in one call, not one call per tab.
+ *   POST {webAppUrl} {"action":"setPriority"|"clearPriority"|"deleteRow","category","description",
+ *        ["importance","urgency" for setPriority]} -> {"ok":true} or {"ok":false,"error":"..."}
+ * Row identity is always (category = tab name, description = column B text, exact trimmed match),
+ * resolved server-side - never a row/gid index.
+ */
+data class SheetPriority(val importance: Float, val urgency: Float)
+
+/** One referred row as returned by `getPriorities`, before grouping by tab/category. */
+data class ReferredRow(val category: String, val description: String, val priority: SheetPriority)
+
+private const val CONNECT_TIMEOUT_MS = 15_000
+private const val READ_TIMEOUT_MS = 15_000
+
+/**
+ * Fetches every currently-referred row (across all tabs) in one call. A row absent from the
+ * result has not been referred (no importance/urgency set) and must not be imported - see
+ * [toDoItemsFromReferredRows], which callers feed by grouping this list per tab/category.
+ */
+fun fetchAllPriorities(appsScriptUrl: String): List<ReferredRow> = runCatching {
+    val url = "${appsScriptUrl.trimEnd('/')}?action=getPriorities"
+    val json = JSONObject(URL(url).readText())
+    if (!json.optBoolean("ok", false)) return@runCatching emptyList()
+    val rows = json.optJSONArray("rows") ?: return@runCatching emptyList()
+    (0 until rows.length()).mapNotNull { i ->
+        val row = rows.getJSONObject(i)
+        val category = row.optString("category")
+        val description = row.optString("description")
+        if (category.isBlank() || description.isBlank()) return@mapNotNull null
+        ReferredRow(
+            category = category,
+            description = description,
+            priority = SheetPriority(
+                importance = row.optDouble("importance", 0.0).toFloat(),
+                urgency = row.optDouble("urgency", 0.0).toFloat()
+            )
+        )
+    }
+}.getOrDefault(emptyList())
+
+private fun postAction(appsScriptUrl: String, body: JSONObject): Boolean = runCatching {
+    val connection = (URL(appsScriptUrl.trimEnd('/')).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        doOutput = true
+        connectTimeout = CONNECT_TIMEOUT_MS
+        readTimeout = READ_TIMEOUT_MS
+        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+    }
+    connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+    val responseCode = connection.responseCode
+    val responseBody = (if (responseCode in 200..299) connection.inputStream else connection.errorStream)
+        ?.bufferedReader()?.readText().orEmpty()
+    connection.disconnect()
+    responseCode in 200..299 && JSONObject(responseBody).optBoolean("ok", false)
+}.getOrDefault(false)
+
+/** "Complete (for now)": clears importance/urgency so MicroTasking can queue the row again. */
+fun clearSheetPriority(appsScriptUrl: String, category: String, description: String): Boolean =
+    postAction(
+        appsScriptUrl,
+        JSONObject().apply {
+            put("action", "clearPriority")
+            put("category", category)
+            put("description", description)
+        }
+    )
+
+/** "Fully complete": deletes the row outright (checkbox + description + link + hidden columns). */
+fun deleteSheetRow(appsScriptUrl: String, category: String, description: String): Boolean =
+    postAction(
+        appsScriptUrl,
+        JSONObject().apply {
+            put("action", "deleteRow")
+            put("category", category)
+            put("description", description)
+        }
+    )
