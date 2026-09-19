@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
@@ -38,14 +37,12 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -56,6 +53,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -65,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,6 +79,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -87,6 +87,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val storedItems = readToDoItems(preferences.getString("todo_items", "[]") ?: "[]")
+        val loadedItems = itemsToLoad(preferences.getInt("items_schema", 1), storedItems)
+        if (loadedItems != storedItems || preferences.getInt("items_schema", 1) < ITEMS_SCHEMA_VERSION) {
+            preferences.edit()
+                .putString("todo_items", writeToDoItems(loadedItems))
+                .putInt("items_schema", ITEMS_SCHEMA_VERSION)
+                .apply()
+        }
         setContent {
             MaterialTheme(colorScheme = twoDo2GoColorScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -95,14 +103,16 @@ class MainActivity : ComponentActivity() {
                         initialAppsScriptUrl = preferences.getString("apps_script_url", "") ?: "",
                         initialImportanceWeight = preferences.getFloat("importance_weight", DEFAULT_IMPORTANCE_WEIGHT),
                         initialTopN = preferences.getInt("top_n", 5),
-                        initialItems = readToDoItems(preferences.getString("todo_items", "[]") ?: "[]"),
+                        initialItems = loadedItems,
                         initialLists = readStringList(preferences.getString("known_lists", "[]") ?: "[]"),
+                        initialLastList = preferences.getString("last_list", null),
                         onSheetUrlSaved = { url -> preferences.edit().putString("sheet_url", url).apply() },
                         onAppsScriptUrlSaved = { url -> preferences.edit().putString("apps_script_url", url).apply() },
                         onImportanceWeightSaved = { weight -> preferences.edit().putFloat("importance_weight", weight).apply() },
                         onTopNSaved = { count -> preferences.edit().putInt("top_n", count).apply() },
                         onItemsSaved = { items -> preferences.edit().putString("todo_items", writeToDoItems(items)).apply() },
-                        onListsSaved = { lists -> preferences.edit().putString("known_lists", writeStringList(lists)).apply() }
+                        onListsSaved = { lists -> preferences.edit().putString("known_lists", writeStringList(lists)).apply() },
+                        onLastListSaved = { list -> preferences.edit().putString("last_list", list).apply() }
                     )
                 }
             }
@@ -124,12 +134,14 @@ fun TwoDo2GoApp(
     initialTopN: Int,
     initialItems: List<ToDoItem>,
     initialLists: List<String>,
+    initialLastList: String?,
     onSheetUrlSaved: (String) -> Unit,
     onAppsScriptUrlSaved: (String) -> Unit,
     onImportanceWeightSaved: (Float) -> Unit,
     onTopNSaved: (Int) -> Unit,
     onItemsSaved: (List<ToDoItem>) -> Unit,
-    onListsSaved: (List<String>) -> Unit
+    onListsSaved: (List<String>) -> Unit,
+    onLastListSaved: (String) -> Unit
 ) {
     var screen by remember { mutableStateOf(if (initialSheetUrl.isBlank()) Screen.SETTINGS else Screen.CAROUSEL) }
     var sheetUrl by remember { mutableStateOf(initialSheetUrl) }
@@ -138,9 +150,10 @@ fun TwoDo2GoApp(
     var topN by remember { mutableStateOf(initialTopN) }
     var items by remember { mutableStateOf(initialItems) }
     var lists by remember { mutableStateOf(initialLists) }
+    var lastList by remember { mutableStateOf(initialLastList) }
     var editingItemId by remember { mutableStateOf<String?>(null) }
-    var addItemList by remember { mutableStateOf<String?>(null) }
     var syncMessage by remember { mutableStateOf("") }
+    var actionError by remember { mutableStateOf("") }
     var syncing by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
@@ -187,28 +200,28 @@ fun TwoDo2GoApp(
 
     fun completeForNow(item: ToDoItem) {
         busy = true
+        actionError = ""
         coroutineScope.launch {
             val ok = withContext(Dispatchers.IO) { clearSheetPriority(appsScriptUrl, item.list, item.description) }
             busy = false
             if (ok) {
                 persistItems(items.filterNot { it.id == item.id })
-                editingItemId = null
             } else {
-                syncMessage = "Couldn't reach the Sheet to clear this item's priority - check your connection and try again."
+                actionError = "Couldn't reach the Sheet to clear this item's priority - check your connection and try again."
             }
         }
     }
 
     fun fullyComplete(item: ToDoItem) {
         busy = true
+        actionError = ""
         coroutineScope.launch {
             val ok = withContext(Dispatchers.IO) { deleteSheetRow(appsScriptUrl, item.list, item.description) }
             busy = false
             if (ok) {
                 persistItems(items.filterNot { it.id == item.id })
-                editingItemId = null
             } else {
-                syncMessage = "Couldn't reach the Sheet to remove this row - check your connection and try again."
+                actionError = "Couldn't reach the Sheet to remove this row - check your connection and try again."
             }
         }
     }
@@ -256,9 +269,17 @@ fun TwoDo2GoApp(
             items = items,
             importanceWeight = importanceWeight,
             topN = topN,
+            initialList = initialListName(lists, items, importanceWeight, lastList),
+            busy = busy,
+            actionError = actionError,
+            onListOpened = { list ->
+                lastList = list
+                onLastListSaved(list)
+            },
             onOpenSettings = { screen = Screen.SETTINGS },
-            onOpenItem = { editingItemId = it },
-            onAddItem = { listName -> addItemList = listName }
+            onAdjustItem = { editingItemId = it },
+            onCompleteForNow = { item -> completeForNow(item) },
+            onFullyComplete = { item -> fullyComplete(item) }
         )
     }
 
@@ -266,43 +287,12 @@ fun TwoDo2GoApp(
     if (editingItem != null) {
         ItemDetailDialog(
             item = editingItem,
-            busy = busy,
             onDismiss = { editingItemId = null },
             onPriorityChange = { importance, urgency ->
                 persistItems(items.map { if (it.id == editingItem.id) it.copy(importance = importance, urgency = urgency) else it })
             },
             onProgressChange = { progress ->
                 persistItems(items.map { if (it.id == editingItem.id) it.copy(progress = progress) else it })
-            },
-            onCompleteForNow = { completeForNow(editingItem) },
-            onFullyComplete = { fullyComplete(editingItem) },
-            onMarkLocalComplete = {
-                persistItems(items.map {
-                    if (it.id == editingItem.id) it.copy(done = true, doneAtEpochMs = System.currentTimeMillis()) else it
-                })
-                editingItemId = null
-            },
-            onDeleteLocal = {
-                persistItems(items.filterNot { it.id == editingItem.id })
-                editingItemId = null
-            }
-        )
-    }
-
-    val addingToList = addItemList
-    if (addingToList != null) {
-        AddItemDialog(
-            onDismiss = { addItemList = null },
-            onConfirm = { description, importance, urgency ->
-                val newItem = ToDoItem(
-                    id = "local-${System.currentTimeMillis()}-${items.size}",
-                    description = description,
-                    list = addingToList,
-                    importance = importance,
-                    urgency = urgency
-                )
-                persistItems(items + newItem)
-                addItemList = null
             }
         )
     }
@@ -408,11 +398,26 @@ fun CarouselScreen(
     items: List<ToDoItem>,
     importanceWeight: Float,
     topN: Int,
+    initialList: String?,
+    busy: Boolean,
+    actionError: String,
+    onListOpened: (String) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenItem: (String) -> Unit,
-    onAddItem: (list: String) -> Unit
+    onAdjustItem: (String) -> Unit,
+    onCompleteForNow: (ToDoItem) -> Unit,
+    onFullyComplete: (ToDoItem) -> Unit
 ) {
-    val pagerState = rememberPagerState(pageCount = { lists.size })
+    val pagerState = rememberPagerState(
+        initialPage = lists.indexOf(initialList).coerceAtLeast(0),
+        pageCount = { lists.size }
+    )
+    // Only a page the user actually swiped to counts as "last opened"; the initial page is just
+    // where we started (possibly the highest-priority fallback), so it isn't recorded.
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }
+            .drop(1)
+            .collect { page -> lists.getOrNull(page)?.let(onListOpened) }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -423,14 +428,6 @@ fun CarouselScreen(
                     }
                 }
             )
-        },
-        floatingActionButton = {
-            val currentList = lists.getOrNull(pagerState.currentPage)
-            if (currentList != null) {
-                FloatingActionButton(onClick = { onAddItem(currentList) }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Add item")
-                }
-            }
         }
     ) { padding ->
         if (lists.isEmpty()) {
@@ -466,6 +463,14 @@ fun CarouselScreen(
                     }
                 }
             }
+            if (actionError.isNotBlank()) {
+                Text(
+                    actionError,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                 val listName = lists[page]
                 val topItems = sortedForDisplay(items.filter { it.list == listName && !it.done }, importanceWeight).take(topN)
@@ -482,8 +487,14 @@ fun CarouselScreen(
                         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(topItems) { toDoItem ->
-                            ToDoItemRow(item = toDoItem, onOpen = { onOpenItem(toDoItem.id) })
+                        items(topItems, key = { it.id }) { toDoItem ->
+                            ToDoItemRow(
+                                item = toDoItem,
+                                busy = busy,
+                                onAdjust = { onAdjustItem(toDoItem.id) },
+                                onCompleteForNow = { onCompleteForNow(toDoItem) },
+                                onFullyComplete = { onFullyComplete(toDoItem) }
+                            )
                         }
                     }
                 }
@@ -499,9 +510,17 @@ private fun quadrantColor(quadrant: Quadrant, colorScheme: androidx.compose.mate
     Quadrant.ELIMINATE -> colorScheme.onSurfaceVariant
 }
 
+/** One referred task with its actions underneath, MicroTasking-style: no checkbox, no trash icon. */
 @Composable
-fun ToDoItemRow(item: ToDoItem, onOpen: () -> Unit) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen)) {
+fun ToDoItemRow(
+    item: ToDoItem,
+    busy: Boolean,
+    onAdjust: () -> Unit,
+    onCompleteForNow: () -> Unit,
+    onFullyComplete: () -> Unit
+) {
+    val context = LocalContext.current
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(item.description, style = MaterialTheme.typography.bodyLarge)
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
@@ -517,6 +536,22 @@ fun ToDoItemRow(item: ToDoItem, onOpen: () -> Unit) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onCompleteForNow, enabled = !busy, modifier = Modifier.weight(1f)) {
+                    Text("Complete (for now)")
+                }
+                Button(onClick = onFullyComplete, enabled = !busy, modifier = Modifier.weight(1f)) {
+                    Text("Fully complete")
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = onAdjust, enabled = !busy) { Text("Priority & progress") }
+                if (item.link.isNotBlank()) {
+                    TextButton(onClick = {
+                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link))) }
+                    }) { Text("Open link") }
+                }
             }
         }
     }
@@ -607,37 +642,19 @@ private fun Modifier.pointerInputMatrix(onOffset: (x: Float, y: Float) -> Unit):
         }
     }
 
+/** Re-triage (priority matrix) and progress for a referred item; local-only, never written to the Sheet. */
 @Composable
 fun ItemDetailDialog(
     item: ToDoItem,
-    busy: Boolean,
     onDismiss: () -> Unit,
     onPriorityChange: (importance: Float, urgency: Float) -> Unit,
-    onProgressChange: (Int) -> Unit,
-    onCompleteForNow: () -> Unit,
-    onFullyComplete: () -> Unit,
-    onMarkLocalComplete: () -> Unit,
-    onDeleteLocal: () -> Unit
+    onProgressChange: (Int) -> Unit
 ) {
-    val isSheetBacked = item.id.startsWith("sheet-")
-    val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(item.description) },
         text = {
             Column {
-                if (item.link.isNotBlank()) {
-                    Text(
-                        "Open link",
-                        color = MaterialTheme.colorScheme.primary,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier
-                            .clickable {
-                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link))) }
-                            }
-                            .padding(bottom = 8.dp)
-                    )
-                }
                 MatrixWidget(
                     importance = item.importance,
                     urgency = item.urgency,
@@ -657,60 +674,7 @@ fun ItemDetailDialog(
             }
         },
         confirmButton = {
-            if (isSheetBacked) {
-                Column(horizontalAlignment = Alignment.End) {
-                    Button(onClick = onFullyComplete, enabled = !busy) { Text("Fully complete") }
-                    OutlinedButton(onClick = onCompleteForNow, enabled = !busy, modifier = Modifier.padding(top = 8.dp)) {
-                        Text("Complete (for now)")
-                    }
-                }
-            } else {
-                Column(horizontalAlignment = Alignment.End) {
-                    Button(onClick = onMarkLocalComplete, enabled = !busy) { Text("Mark complete") }
-                    OutlinedButton(onClick = onDeleteLocal, enabled = !busy, modifier = Modifier.padding(top = 8.dp)) {
-                        Text("Delete")
-                    }
-                }
-            }
-        },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
-        }
-    )
-}
-
-@Composable
-fun AddItemDialog(onDismiss: () -> Unit, onConfirm: (description: String, importance: Float, urgency: Float) -> Unit) {
-    var description by remember { mutableStateOf("") }
-    var importance by remember { mutableStateOf(0f) }
-    var urgency by remember { mutableStateOf(0f) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Add item") },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = description,
-                    onValueChange = { description = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Description") }
-                )
-                MatrixWidget(
-                    importance = importance,
-                    urgency = urgency,
-                    onChange = { i, u -> importance = i; urgency = u },
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
-                )
-            }
-        },
-        confirmButton = {
-            Button(onClick = { if (description.isNotBlank()) onConfirm(description.trim(), importance, urgency) }) {
-                Text("Add")
-            }
-        },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss) { Text("Cancel") }
+            Button(onClick = onDismiss) { Text("Done") }
         }
     )
 }

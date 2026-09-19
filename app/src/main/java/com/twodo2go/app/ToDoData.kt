@@ -173,6 +173,43 @@ fun mergeImportedToDoItems(imported: List<ToDoItem>, existing: List<ToDoItem>): 
     return existing + imported.filter { it.id !in existingIds }
 }
 
+/**
+ * Bumped whenever previously-stored items can no longer be trusted as "referred by MicroTasking".
+ * Version 2: v1 stored every checked sheet row (the pre-referral scaffold) plus ad-hoc `local-`
+ * items, none of which were referred - and [mergeImportedToDoItems] never removes anything, so
+ * they'd otherwise linger in the lists forever.
+ */
+const val ITEMS_SCHEMA_VERSION = 2
+
+/**
+ * Items to load from storage. Anything stored under an older [ITEMS_SCHEMA_VERSION] is dropped
+ * wholesale (the next sync re-imports whatever is genuinely referred), and ad-hoc `local-` items
+ * are never loaded - a list only ever holds items referred from MicroTasking.
+ */
+fun itemsToLoad(storedSchemaVersion: Int, stored: List<ToDoItem>): List<ToDoItem> =
+    if (storedSchemaVersion < ITEMS_SCHEMA_VERSION) emptyList()
+    else stored.filter { it.id.startsWith("sheet-") }
+
+/**
+ * Which list the carousel opens on: the last one the user viewed, else the list whose top open
+ * item has the highest priority score (earlier list wins ties; a list with no open items ranks
+ * last, so with nothing referred anywhere this is just the first list). Null only if [lists] is
+ * empty.
+ */
+fun initialListName(
+    lists: List<String>,
+    items: List<ToDoItem>,
+    importanceWeight: Float,
+    lastOpenedList: String?
+): String? {
+    if (lastOpenedList != null && lastOpenedList in lists) return lastOpenedList
+    return lists.maxByOrNull { listName ->
+        items.filter { it.list == listName && !it.done }
+            .maxOfOrNull { it.priorityScore(importanceWeight) }
+            ?: Float.NEGATIVE_INFINITY
+    }
+}
+
 fun readStringList(json: String): List<String> = runCatching {
     val values = JSONArray(json)
     List(values.length()) { values.getString(it) }

@@ -43,10 +43,14 @@ Four source files under `app/src/main/java/com/twodo2go/app/`:
   Sheet URL, the Apps Script Web App URL, importance-weight and items-per-list settings, Sync
   Lists), `CarouselScreen` (a `HorizontalPager` of per-list top-N views — this *is* the home
   screen, there's no separate "see everything" list-detail screen), the continuous Eisenhower
-  matrix widget (`MatrixWidget`, tap/drag position → importance/urgency floats), `ItemDetailDialog`
-  (progress slider + Complete-for-now/Fully-complete for sheet-backed items, Mark-complete/Delete
-  for ad-hoc ones), add-item dialog, QR scanner (ML Kit barcode scanning, copied from
-  MicroTasking's `QrScannerScreen`).
+  matrix widget (`MatrixWidget`, tap/drag position → importance/urgency floats), `ToDoItemRow`
+  (each referred item is a card: task text, then Complete-for-now / Fully-complete / Priority &
+  progress / Open-link buttons underneath — no checkbox, no trash icon), `ItemDetailDialog`
+  (priority matrix + progress slider only), QR scanner (ML Kit barcode scanning, copied from
+  MicroTasking's `QrScannerScreen`). There is deliberately **no** add-item path: a list only ever
+  holds items referred from MicroTasking (`itemsToLoad` also purges anything a pre-referral build
+  stored, gated by `ITEMS_SCHEMA_VERSION`). The carousel opens on the last-swiped list, else the
+  highest-priority one (`initialListName`).
 - **`ToDoData.kt`** — data model (`ToDoItem`, `Quadrant`), JSON read/write helpers
   (SharedPreferences-backed, no Room/DB — same convention as MicroTasking's `TaskPool.kt`), plain
   CSV row parsing (`parseToDoCsvRows`), gated-ingestion item construction

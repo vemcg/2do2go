@@ -89,6 +89,53 @@ class ToDoDataTest {
     }
 
     @Test
+    fun itemsToLoad_dropsEverythingStoredUnderAnOlderSchema() {
+        // The pre-referral scaffold stored every checked row (same "sheet-" id format), which
+        // can't be told apart from genuinely referred ones - so the whole old set goes.
+        val stored = listOf(
+            ToDoItem(id = "sheet-Cleaning-Vacuum", description = "Vacuum", list = "Cleaning"),
+            ToDoItem(id = "local-1-0", description = "Ad hoc", list = "Cleaning")
+        )
+        assertTrue(itemsToLoad(1, stored).isEmpty())
+    }
+
+    @Test
+    fun itemsToLoad_keepsOnlySheetItemsUnderTheCurrentSchema() {
+        val referred = ToDoItem(id = "sheet-Cleaning-Vacuum", description = "Vacuum", list = "Cleaning", importance = 0.9f)
+        val adHoc = ToDoItem(id = "local-1-0", description = "Ad hoc", list = "Cleaning")
+        assertEquals(listOf(referred), itemsToLoad(ITEMS_SCHEMA_VERSION, listOf(referred, adHoc)))
+    }
+
+    @Test
+    fun initialListName_prefersTheLastOpenedList() {
+        val lists = listOf("Cleaning", "Paperwork", "Errands")
+        val items = listOf(ToDoItem(id = "a", description = "", list = "Errands", importance = 1f, urgency = 1f))
+        assertEquals("Paperwork", initialListName(lists, items, DEFAULT_IMPORTANCE_WEIGHT, lastOpenedList = "Paperwork"))
+    }
+
+    @Test
+    fun initialListName_fallsBackToTheListWithTheHighestPriorityItem() {
+        val lists = listOf("Cleaning", "Paperwork", "Errands")
+        val items = listOf(
+            ToDoItem(id = "a", description = "", list = "Cleaning", importance = 0.2f, urgency = 0.2f),
+            ToDoItem(id = "b", description = "", list = "Errands", importance = 0.9f, urgency = 0.8f),
+            ToDoItem(id = "c", description = "", list = "Errands", importance = 0.1f, urgency = 0.1f),
+            ToDoItem(id = "d", description = "", list = "Paperwork", importance = 1f, urgency = 1f, done = true)
+        )
+        // No last-opened list -> Errands (its top item outranks Cleaning's; Paperwork's only item is done).
+        assertEquals("Errands", initialListName(lists, items, DEFAULT_IMPORTANCE_WEIGHT, lastOpenedList = null))
+        // A last-opened list that no longer exists is treated as none.
+        assertEquals("Errands", initialListName(lists, items, DEFAULT_IMPORTANCE_WEIGHT, lastOpenedList = "Gone"))
+    }
+
+    @Test
+    fun initialListName_isTheFirstListWhenNothingIsReferred() {
+        val lists = listOf("Cleaning", "Paperwork")
+        assertEquals("Cleaning", initialListName(lists, emptyList(), DEFAULT_IMPORTANCE_WEIGHT, lastOpenedList = null))
+        assertEquals(null, initialListName(emptyList(), emptyList(), DEFAULT_IMPORTANCE_WEIGHT, lastOpenedList = null))
+    }
+
+    @Test
     fun quadrant_mapsContinuousValuesToLabelsAndScore() {
         assertEquals(Quadrant.DO_FIRST, ToDoItem(id = "1", description = "", list = "", importance = 1f, urgency = 1f).quadrant())
         assertEquals(Quadrant.SCHEDULE, ToDoItem(id = "2", description = "", list = "", importance = 1f, urgency = 0f).quadrant())

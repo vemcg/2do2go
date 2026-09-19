@@ -21,9 +21,13 @@ and confirmed by the user on both sides (2026-09-18).
   MicroTasking-only and never appears here at all; column A (enabled checkbox) and
   `description`/`link` (header-text matched, order-independent) are still read via the existing
   CSV/gviz path once a row does qualify.
-- Ad-hoc items can also be added directly in the app, independent of the sheet
-  (`id` prefix `local-` vs. `sheet-<list>-<description>` for referred rows). These have no
-  underlying sheet row, so their priority and completion live locally only (see "Screens").
+- **A list holds only items referred from MicroTasking** - nothing else. There is no in-app "add
+  item": a fresh install, or one where nothing has been referred yet, shows every list empty. (An
+  earlier design allowed ad-hoc `local-` items; removed at the user's direction 2026-09-18.)
+  Stored items are versioned (`ITEMS_SCHEMA_VERSION`): anything saved by an older schema - the
+  pre-referral scaffold imported every checked row - is discarded on first launch of a newer
+  build, and `local-` items are never loaded. The next sync re-imports only what is genuinely
+  referred.
 - Re-syncing the sheet only **adds** newly-qualifying rows not already present by id. It never
   removes or overwrites an existing item because its sheet row disappeared, its priority got
   cleared elsewhere, or the description changed underneath it (a changed description is a new id,
@@ -54,15 +58,12 @@ i.e. the old fixed `important*2 + urgent` ratio as a starting point, range `0.5`
 used only for badge label/color - the real ranking always uses the continuous score above.
 
 2do2go keeps its **own** matrix widget too (same continuous behavior, not the old 4-quadrant tap),
-used for:
-- **Ad-hoc/local items**, which have no sheet row to have arrived pre-triaged on - a fresh one
-  starts at `(0, 0)` (Eliminate) until triaged in-app.
-- **Re-triaging** any item afterward (open it, drag the marker). This only updates the local copy
-  - it does not write back to the Sheet even for a Sheet-sourced item, consistent with "the sheet
-  is a source of new items, not a mirror to sync down to" (see "Items").
+used for **re-triaging** an item after it arrives (open "Priority & progress", drag the marker).
+This only updates the local copy - it does not write back to the Sheet, consistent with "the sheet
+is a source of new items, not a mirror to sync down to" (see "Items").
 
-Since ingestion is gated on referral, a Sheet-sourced item never arrives untriaged - referral
-itself requires a matrix touch on MicroTasking's side.
+Since ingestion is gated on referral, an item never arrives untriaged - referral itself requires
+a matrix touch on MicroTasking's side.
 
 ## Referral bridge (MicroTasking → Sheet → 2do2go)
 
@@ -87,17 +88,16 @@ itself requires a matrix touch on MicroTasking's side.
    which would defeat "invisible to the user"). Fetching happens at the app's normal sync
    boundaries (manual "Sync Lists" + any future periodic sync) and the result is persisted
    locally between syncs - no new per-action/live network dependency beyond that.
-7. From an item's detail view, the user can set a 0-100% progress value (2do2go-local only, never
-   written to the Sheet - a `Progress` column was considered and dropped, since linked removal
-   below already prevents any staleness a synced column would have solved) and either:
+7. From an item's card, the user can set a 0-100% progress value (via "Priority & progress";
+   2do2go-local only, never written to the Sheet - a `Progress` column was considered and
+   dropped, since linked removal below already prevents any staleness a synced column would have
+   solved) and either:
    - **Complete (for now)**: clears the row's importance/urgency via the Web App's clear-priority
      endpoint (freeing it back up for MicroTasking's queue) and removes 2do2go's own local copy of
-     the item immediately - linked removal, not waiting for a resync. Only offered on
-     Sheet-sourced items; ad-hoc/local ones have nothing to hand back.
+     the item immediately - linked removal, not waiting for a resync.
    - **Fully complete**: deletes the row entirely via the Web App's delete-row endpoint (same
      shift-up-rows convention MicroTasking's own `onEdit` description-clear already uses) and
-     removes 2do2go's local copy. Ad-hoc/local items get an equivalent "Mark complete"/"Delete"
-     pair instead, since there's no Sheet row for those endpoints to act on.
+     removes 2do2go's local copy.
 
 **Bridge mechanism**: a single Apps Script Web App, owned and deployed by MicroTasking's repo
 (extends the already-bound `scripts/populate_google_sheet.js`, `doGet`/`doPost` endpoints). Both
@@ -129,17 +129,24 @@ implements this contract.
 1. **Settings** - paste/QR-scan the shared Google Sheet URL; the Apps Script Web App URL; "Sync
    Lists" re-runs the import; importance-weight slider (`0.5`-`4.0`, default `2.0`); items-per-list
    count (`1`-`10`, default `5`, a single global setting).
-2. **Carousel** (home screen, and the *only* list screen - there is no separate "see everything"
-   list-detail view) - a horizontal, swipeable page per list, each showing that list's top N open
-   items by priority score. A page indicator (dots) shows position; the FAB adds an ad-hoc item to
-   whichever list's page is currently showing. A tab with zero qualifying (referred) items still
-   shows up, empty, when swiped to.
-3. **Item detail** (dialog, opened by tapping a row) - description, tappable link, the continuous
-   matrix widget (re-triage in place, local-only), a progress slider. Sheet-backed items show
-   Complete-(for-now)/Fully-complete; ad-hoc items show Mark-complete/Delete instead.
-4. **Add item** (dialog) - description plus the continuous matrix widget; always adds to whichever
-   list/page is currently showing on the carousel.
-5. **QR scanner** - unchanged, scans the Sheet URL into Settings.
+2. **Carousel** (home screen, and the *only* list screen - there is no overview of lists with
+   counts, and no separate "see everything" list-detail view) - a horizontal, swipeable page per
+   list, each showing that list's top N open items by priority score. A page indicator (dots)
+   shows position. A tab with zero qualifying (referred) items still shows up, empty, when
+   swiped to.
+   - **Which page it opens on** (`initialListName`): the list the user last swiped to (persisted
+     as `last_list`); if they never have, the list whose top open item has the highest priority
+     score (earlier list wins ties; with nothing referred anywhere, the first list). Only a page
+     the user swiped to is recorded as "last opened" - the page it merely opened on is not, so the
+     highest-priority fallback keeps applying until they navigate.
+   - **Each item is a card**, MicroTasking-style: the task text, its quadrant badge and progress,
+     then the actions underneath as buttons - **Complete (for now)**, **Fully complete**,
+     **Priority & progress** (opens the dialog below), and **Open link** when the row has one.
+     No checkbox and no trash/delete icon. A failed Sheet write leaves the item in place and shows
+     the error above the list.
+3. **Priority & progress** (dialog, from an item's card) - the continuous matrix widget
+   (re-triage in place, local-only) and a progress slider.
+4. **QR scanner** - unchanged, scans the Sheet URL into Settings.
 
 ## Not implemented / explicitly out of scope for now
 

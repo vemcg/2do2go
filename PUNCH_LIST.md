@@ -18,11 +18,12 @@
      "Referral bridge".
    - Done on 2do2go's side: `ToDoItem` model (continuous `importance`/`urgency`, `progress`),
      gated-ingestion sync (`toDoItemsFromReferredRows` + `fetchAllPriorities`), the continuous
-     `MatrixWidget` (replaces the old 4-quadrant tap dialog, used both for referral-equivalent
-     ad-hoc triage and re-triage), the carousel home screen (`CarouselScreen`, replaces Lists
-     overview + List detail entirely), `ItemDetailDialog` (progress slider, Complete-for-now/
-     Fully-complete for sheet-backed items, Mark-complete/Delete for ad-hoc ones), and Settings
-     additions (Apps Script Web App URL field, importance-weight slider, items-per-list count).
+     `MatrixWidget` (replaces the old 4-quadrant tap dialog, used for re-triage), the carousel
+     home screen (`CarouselScreen`, replaces Lists overview + List detail entirely; opens on the
+     last-swiped list, else the highest-priority one), item cards with Complete-for-now/
+     Fully-complete/Priority & progress buttons underneath (no checkbox/trash), `ItemDetailDialog`
+     (priority matrix + progress slider), referred-only lists (no ad-hoc add; older stored items
+     purged), and Settings additions (Apps Script Web App URL field, importance-weight slider, items-per-list count).
    - **Remaining**: on-device verification of the full round trip against a real deployed Web App
      (referral in MicroTasking → shows up in 2do2go → Complete-for-now hands it back → MicroTasking
      re-queues it); the combined onboarding QR for both URLs is tracked in MicroTasking's
